@@ -77,9 +77,15 @@ import os as _os
 SRC_DIR = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "src")
 
 # 棋子图片（JPG/PNG，会自动缩放到棋子大小并做圆形裁剪）
-SRC_PLAYER_PIECE = _os.path.join(SRC_DIR, "player.jpg")   # 人类玩家棋子
-SRC_AI_PIECE     = _os.path.join(SRC_DIR, "ai.jpg")       # AI 棋子
+import os
+from pathlib import Path
 
-# 落子音效（WAV 格式）
-SRC_PLAYER_SOUND = _os.path.join(SRC_DIR, "player_do.wav") # 人类落子音效
-SRC_AI_SOUND     = _os.path.join(SRC_DIR, "ai_do.wav")     # AI 落子音效
+# 获取当前 config.py 所在的绝对路径
+BASE_DIR = Path(__file__).resolve().parent
+
+# ── 资源路径（强制转换为绝对路径） ───────────────────────────
+# 这样无论你在哪执行程序，都会自动指向 5z7/src/ 目录
+SRC_PLAYER_PIECE = str(BASE_DIR / "src" / "player.jpg")
+SRC_AI_PIECE     = str(BASE_DIR / "src" / "ai.jpg")
+SRC_PLAYER_SOUND = str(BASE_DIR / "src" / "player_do.wav")
+SRC_AI_SOUND     = str(BASE_DIR / "src" / "ai_do.wav")
