@@ -93,11 +93,17 @@ class GameEngine:
             # 4. 写入棋盘
             self.board.place(row, col, self._current_piece)
 
-            # 5. 胜负判断
+            # 5. 通知对手玩家本次落子坐标（如 DeepSeekAgent 需要记录对手上一步）
+            next_piece = WHITE if self._current_piece == BLACK else BLACK
+            next_player = self._players[next_piece]
+            if hasattr(next_player, "notify_opponent_move"):
+                next_player.notify_opponent_move(row, col)
+
+            # 6. 胜负判断
             if self._check_end_after_action(row, col):
                 break
 
-            # 6. 切换回合
+            # 7. 切换回合
             self._switch_turn()
 
     # ── 悔棋公开接口（GUI 主线程调用）───────────────────────

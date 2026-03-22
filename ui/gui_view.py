@@ -5,6 +5,20 @@ import pygame, pygame.gfxdraw
 from typing import Optional, List
 import config as C
 
+# ── TTS 语音模块（懒加载，避免启动时出错影响游戏）──────────
+_tts_player = None
+
+def _get_tts():
+    global _tts_player
+    if _tts_player is None:
+        try:
+            from tts import TTSPlayer
+            _tts_player = TTSPlayer()
+        except Exception as e:
+            print(f"[TTS] 初始化失败：{e}")
+            _tts_player = False  # 标记为不可用
+    return _tts_player if _tts_player else None
+
 _BOARD_AREA_W = C.GUI_WINDOW_W - C.GUI_SIDE_PANEL_W
 _BOARD_AREA_H = C.GUI_WINDOW_H
 _CELL = (_BOARD_AREA_W - 2 * C.GUI_BOARD_MARGIN) // (C.BOARD_SIZE - 1)
@@ -120,11 +134,14 @@ class GUIView:
         # 技能特效动画队列: [(type, cx, cy, start_time)]
         self._skill_fx: list = []
 
+        # ── 猫娘打字机状态 ───────────────────────────────────
+        self._typewriter_pos: int = 0
+        self._typewriter_last_text: str = ""
+
         # ── 技能状态机 ───────────────────────────────────────
-        # None / "horse_first" / "horse_second" / "swap" / "void"
         self._skill_mode: Optional[str] = None
-        self._horse_first: Optional[tuple] = None   # 一马当先第一落点
-        self._skill_flash: Optional[str] = None     # 当前闪烁技能名
+        self._horse_first: Optional[tuple] = None
+        self._skill_flash: Optional[str] = None
         self._skill_flash_t: float = 0.0
 
         # ── 外部资源 ─────────────────────────────────────────
@@ -136,16 +153,17 @@ class GUIView:
         self._piece_owner: dict = {}
 
         # ── 侧边栏技能按钮布局（运行时计算）────────────────
-        self._btn_rects: dict = {}  # {"undo": Rect, "horse": Rect, ...}
+        self._btn_rects: dict = {}
 
     # ─────────────────────────────────────────────────────────
     # 主菜单
     # ─────────────────────────────────────────────────────────
     def show_menu(self) -> Optional[str]:
         buttons = [
-            ("pve", "人机对战", "人类(黑) vs AI(白)"),
-            ("pvp", "双人对战", "玩家1 vs 玩家2"),
-            ("eve", "AI 自战",  "AI(黑) vs AI(白)"),
+            ("pve", "人机对战",   "人类(黑) vs AI(白)"),
+            ("pvp", "双人对战",   "玩家1 vs 玩家2"),
+            ("eve", "AI 自战",    "AI(黑) vs AI(白)"),
+            ("pvd", "挑战大模型", "人类(黑) vs DeepSeek R1(白)"),
         ]
         btn_w, btn_h = 360, 70; gap = 20
         total_h = len(buttons)*btn_h + (len(buttons)-1)*gap
@@ -176,16 +194,25 @@ class GUIView:
                 bx=(C.GUI_WINDOW_W-btn_w)//2; by=start_y+i*(btn_h+gap)
                 is_hover = bx<=mx<=bx+btn_w and by<=my<=by+btn_h
                 bs = pygame.Surface((btn_w,btn_h), pygame.SRCALPHA)
+                is_ds = (mode == "pvd")
                 if is_hover:
                     pulse=abs(math.sin(t*3))*0.15+0.85
-                    bg=tuple(int(c*pulse) for c in C.GUI_COLOR_ACCENT)+(60,)
-                    bc=C.GUI_COLOR_ACCENT
+                    if is_ds:
+                        bg=tuple(int(c*pulse) for c in (60,200,120))+(60,)
+                        bc=(60,220,120)
+                    else:
+                        bg=tuple(int(c*pulse) for c in C.GUI_COLOR_ACCENT)+(60,)
+                        bc=C.GUI_COLOR_ACCENT
                 else:
-                    bg=(*C.GUI_COLOR_PANEL_BG,180); bc=C.GUI_COLOR_PANEL_BORDER
+                    bg=(*C.GUI_COLOR_PANEL_BG,180)
+                    bc=(40,120,70) if is_ds else C.GUI_COLOR_PANEL_BORDER
                 pygame.draw.rect(bs, bg,(0,0,btn_w,btn_h),border_radius=14)
                 pygame.draw.rect(bs, (*bc,200),(0,0,btn_w,btn_h),2,border_radius=14)
                 self._screen.blit(bs,(bx,by))
-                tc=C.GUI_COLOR_ACCENT if is_hover else C.GUI_COLOR_TEXT_MAIN
+                if is_ds:
+                    tc=(60,220,120) if is_hover else (60,180,100)
+                else:
+                    tc=C.GUI_COLOR_ACCENT if is_hover else C.GUI_COLOR_TEXT_MAIN
                 lt=self._fn.render(label,True,tc); dt=self._fs.render(desc,True,C.GUI_COLOR_TEXT_DIM)
                 self._screen.blit(lt,(bx+(btn_w-lt.get_width())//2,by+12))
                 self._screen.blit(dt,(bx+(btn_w-dt.get_width())//2,by+42))
@@ -259,7 +286,6 @@ class GUIView:
                 if ev.type == pygame.QUIT: pygame.quit(); raise SystemExit(0)
                 if ev.type == pygame.KEYDOWN:
                     if ev.key == pygame.K_ESCAPE:
-                        # 按 ESC 取消技能模式，或退出
                         if self._skill_mode:
                             self._skill_mode = None; self._horse_first = None
                         else:
@@ -275,22 +301,14 @@ class GUIView:
             pygame.display.flip()
 
     def _handle_click(self, pos):
-        """统一处理鼠标点击：侧边栏按钮 / 棋盘落子 / 技能选格。"""
-        # 检查侧边栏按钮
         for btn_id, rect in self._btn_rects.items():
             if rect.collidepoint(pos):
                 self._on_btn(btn_id); return
-
         if self._game_over: return
-
         rc = self._px2bd(pos)
         if rc is None: return
-
-        # 技能模式下的点击
         if self._skill_mode:
             self._on_skill_click(*rc); return
-
-        # 普通落子
         self._on_click(*rc)
 
     def _update_ai(self):
@@ -305,12 +323,10 @@ class GUIView:
     def _on_btn(self, btn_id: str):
         if self._game_over: return
         if not self._is_human_turn(): return
-
         if btn_id == "undo":
             self._try_undo()
         elif btn_id in ("horse", "swap", "void"):
             if self._engine_ref and self._engine_ref.skill_charges.get(btn_id, 0) > 0:
-                # 切换技能模式
                 if self._skill_mode == btn_id + ("_first" if btn_id=="horse" else ""):
                     self._skill_mode = None; self._horse_first = None
                 else:
@@ -345,20 +361,15 @@ class GUIView:
     def _on_skill_click(self, row: int, col: int):
         engine = self._engine_ref
         if not engine: return
-
         if self._skill_mode == "horse_first":
-            # 选第一落点：必须是空格
-            with self._lock:
-                snap = self._board_snap
+            with self._lock: snap = self._board_snap
             if snap and snap.is_valid_move(row, col):
                 self._horse_first = (row, col)
                 self._skill_mode = "horse_second"
             return
-
         if self._skill_mode == "horse_second":
             if self._horse_first is None: return
             r1,c1 = self._horse_first
-            # 第二落点必须是 (r1±1, c1±1) 中的一个空格
             dr,dc = row-r1, col-c1
             if abs(dr)==1 and abs(dc)==1:
                 ok = engine.skill_horse(r1, c1, dr, dc)
@@ -367,38 +378,30 @@ class GUIView:
                     self._add_skill_fx("horse", r1, c1)
                     self._skill_mode = None; self._horse_first = None
                     self._after_skill(engine)
-                    self._notify_human_dummy(engine)
             return
-
         if self._skill_mode == "swap":
             opp = C.WHITE if self._current_piece==C.BLACK else C.BLACK
-            with self._lock:
-                snap = self._board_snap
+            with self._lock: snap = self._board_snap
             if snap and snap.get(row,col)==opp:
                 ok = engine.skill_swap(row, col)
                 if ok:
                     self._add_skill_fx("swap", row, col)
                     self._skill_mode = None
                     self._after_skill(engine)
-                    self._notify_human_dummy(engine)
             return
-
         if self._skill_mode == "void":
             ok = engine.skill_void(row, col)
             if ok:
                 self._add_skill_fx("void", row, col)
                 self._skill_mode = None
                 self._after_skill(engine)
-                self._notify_human_dummy(engine)
             return
 
     def _after_skill(self, engine):
-        """技能生效后：更新棋盘快照、播音效、render。"""
         self.render(engine.board)
         if self._snd_skill:
             try: self._snd_skill.play()
             except: pass
-        # 检查技能后是否有人赢了
         winner = engine.board.check_win_full()
         if winner != C.EMPTY:
             from config import PIECE_NAMES
@@ -411,23 +414,11 @@ class GUIView:
         with self._lock:
             self._board_snap = board.copy()
 
-    def _notify_human_dummy(self, engine):
-        """
-        技能使用后，不切换回合，但玩家仍需正常落子。
-        GUIHumanPlayer 还在 wait()，不需要做任何事。
-        实际上技能不走引擎循环，所以不需要 submit。
-        技能用完后还需要继续等待引擎给出 get_move 请求。
-        但由于引擎在后台线程阻塞 get_move()，技能直接改棋盘：
-        这里什么都不做，玩家继续点棋盘落子即可。
-        """
-        pass
-
     # ─────────────────────────────────────────────────────────
     # 坐标 + 普通落子
     # ─────────────────────────────────────────────────────────
     def _px2bd(self, pos):
-        with self._lock:
-            snap = self._board_snap
+        with self._lock: snap = self._board_snap
         if not snap: return None
         x,y = pos; thresh=_CELL*0.45
         col=round((x-_ORIGIN_X)/_CELL); row=round((y-_ORIGIN_Y)/_CELL)
@@ -443,8 +434,7 @@ class GUIView:
         if not self._engine_ref: return
         p = self._engine_ref._players.get(self._current_piece)
         if not isinstance(p, GUIHumanPlayer): return
-        with self._lock:
-            snap = self._board_snap
+        with self._lock: snap = self._board_snap
         if not snap or not snap.is_valid_move(row,col): return
         p.submit_move(row,col)
 
@@ -480,7 +470,17 @@ class GUIView:
             pygame.draw.line(self._screen,cl,(_ORIGIN_X,_ORIGIN_Y+i*_CELL),(_ORIGIN_X+(sz-1)*_CELL,_ORIGIN_Y+i*_CELL),1)
             pygame.draw.line(self._screen,cl,(_ORIGIN_X+i*_CELL,_ORIGIN_Y),(_ORIGIN_X+i*_CELL,_ORIGIN_Y+(sz-1)*_CELL),1)
         pygame.draw.rect(self._screen,cl,(_ORIGIN_X,_ORIGIN_Y,(sz-1)*_CELL,(sz-1)*_CELL),2)
-        stars=[(3,3),(3,11),(7,7),(11,3),(11,11)] if sz==15 else ([(sz//2,sz//2)] if sz>=9 else [])
+        # 动态计算星位：天元居中，四个角星位距离边缘约棋盘大小的1/4
+        if sz == 15:
+            stars = [(3,3),(3,11),(7,7),(11,3),(11,11)]
+        elif sz == 19:
+            stars = [(3,3),(3,9),(3,15),(9,3),(9,9),(9,15),(15,3),(15,9),(15,15)]
+        elif sz >= 9:
+            half = sz // 2
+            q = max(3, sz // 4)
+            stars = [(q, q), (q, sz-1-q), (half, half), (sz-1-q, q), (sz-1-q, sz-1-q)]
+        else:
+            stars = []
         for sr,sc in stars:
             px,py=self._bd2px(sr,sc)
             pygame.gfxdraw.filled_circle(self._screen,px,py,4,C.GUI_COLOR_STAR_DOT)
@@ -500,7 +500,6 @@ class GUIView:
         for r,c,piece,st in anims:
             if (now-st)<self._DROP_DUR: anim_coords.add((r,c))
 
-        # 技能高亮：乾坤挪移时高亮对手棋子，终归虚无高亮所有棋子
         highlight_opp = (self._skill_mode=="swap")
         highlight_void = (self._skill_mode=="void")
         opp_piece = C.WHITE if self._current_piece==C.BLACK else C.BLACK
@@ -511,19 +510,16 @@ class GUIView:
                 if piece!=C.EMPTY and (r,c) not in anim_coords:
                     cx,cy=self._bd2px(r,c)
                     if highlight_opp and piece==opp_piece:
-                        # 高亮对手棋子：添加金色光圈
                         tmp=pygame.Surface((_BOARD_AREA_W,_BOARD_AREA_H),pygame.SRCALPHA)
                         pulse=abs(math.sin(t*4))*60+120
                         pygame.gfxdraw.aacircle(tmp,cx,cy,_PIECE_R+4,(255,200,50,int(pulse)))
                         pygame.gfxdraw.filled_circle(tmp,cx,cy,_PIECE_R+4,(255,200,50,40))
                         self._screen.blit(tmp,(0,0))
                     if highlight_void:
-                        # 淡化棋盘棋子
                         self._blit_piece(self._screen,cx,cy,_PIECE_R,piece,160)
                     else:
                         self._blit_piece(self._screen,cx,cy,_PIECE_R,piece,255)
 
-        # 终归虚无高亮：悬停格的 3×3
         if highlight_void and self._hover:
             hr,hc=self._hover
             tmp=pygame.Surface((_BOARD_AREA_W,_BOARD_AREA_H),pygame.SRCALPHA)
@@ -537,7 +533,6 @@ class GUIView:
                         pygame.draw.rect(tmp,(180,80,255,pulse),rect,border_radius=4)
             self._screen.blit(tmp,(0,0))
 
-        # 一马当先：高亮已选第一落点
         if self._skill_mode=="horse_second" and self._horse_first:
             r1,c1=self._horse_first
             cx,cy=self._bd2px(r1,c1)
@@ -546,11 +541,9 @@ class GUIView:
             pygame.gfxdraw.filled_circle(tmp,cx,cy,_PIECE_R+3,(100,200,255,pulse))
             pygame.gfxdraw.aacircle(tmp,cx,cy,_PIECE_R+3,(100,200,255,220))
             self._screen.blit(tmp,(0,0))
-            # 显示4个可选斜方向
             for dr,dc in [(-1,-1),(-1,1),(1,-1),(1,1)]:
                 nr,nc=r1+dr,c1+dc
-                with self._lock:
-                    snap2=self._board_snap
+                with self._lock: snap2=self._board_snap
                 if snap2 and 0<=nr<snap2.size and 0<=nc<snap2.size and snap2.is_valid_move(nr,nc):
                     ex,ey=self._bd2px(nr,nc)
                     tmp2=pygame.Surface((_BOARD_AREA_W,_BOARD_AREA_H),pygame.SRCALPHA)
@@ -558,7 +551,6 @@ class GUIView:
                     pygame.gfxdraw.aacircle(tmp2,ex,ey,_PIECE_R,(100,200,255,160))
                     self._screen.blit(tmp2,(0,0))
 
-        # 动画棋子
         new_anims=[]
         for r,c,piece,st in anims:
             elapsed=now-st
@@ -598,7 +590,6 @@ class GUIView:
             _draw_piece(surf,cx,cy,radius,piece==C.BLACK,alpha)
 
     def _draw_skill_fx(self, t):
-        """绘制技能特效动画。"""
         now=time.time(); dur=0.6; new_fx=[]
         tmp=pygame.Surface((_BOARD_AREA_W,_BOARD_AREA_H),pygame.SRCALPHA)
         for sk,cx,cy,st in self._skill_fx:
@@ -607,12 +598,10 @@ class GUIView:
             new_fx.append((sk,cx,cy,st)); p=el/dur
             color=_SKILL_COLORS.get(sk,(255,255,255))
             if sk=="horse":
-                # 从上掉落闪光
                 rad=int(_PIECE_R*(1.5-p)); a=int(255*(1-p))
                 for w,fa in [(rad+8,30),(rad+4,70),(rad,a)]:
                     if w>0: pygame.gfxdraw.aacircle(tmp,cx,cy,w,(*color,fa))
             elif sk=="swap":
-                # 旋转光环
                 for i in range(8):
                     angle=i*math.pi/4+p*math.pi*4
                     rx=int(cx+(_PIECE_R+6)*math.cos(angle)); ry=int(cy+(_PIECE_R+6)*math.sin(angle))
@@ -620,7 +609,6 @@ class GUIView:
                     pygame.gfxdraw.filled_circle(tmp,rx,ry,4,(*color,a))
                 a=int(180*(1-p)); pygame.gfxdraw.aacircle(tmp,cx,cy,_PIECE_R+4,(*color,a))
             elif sk=="void":
-                # 向外扩散的方形波纹
                 sz=int((_PIECE_R*4)*p); a=int(200*(1-p))
                 if sz>0:
                     rect=pygame.Rect(cx-sz//2,cy-sz//2,sz,sz)
@@ -645,7 +633,7 @@ class GUIView:
         if not isinstance(p,GUIHumanPlayer): return
         r,c=self._hover
         with self._lock: snap=self._board_snap
-        if self._skill_mode: return  # 技能模式下不显示悬停预览
+        if self._skill_mode: return
         if not snap or not snap.is_valid_move(r,c): return
         cx,cy=self._bd2px(r,c)
         tmp=pygame.Surface((_BOARD_AREA_W,_BOARD_AREA_H),pygame.SRCALPHA)
@@ -670,9 +658,9 @@ class GUIView:
         _glow_line(self._screen,self._bd2px(*self._win_line[0]),self._bd2px(*self._win_line[1]),C.GUI_COLOR_WIN_LINE,4)
 
     # ─────────────────────────────────────────────────────────
-    # 侧边栏（含技能按钮）
+    # 侧边栏（含技能按钮 + DeepSeek 双舱）
     # ─────────────────────────────────────────────────────────
-    def _draw_panel(self,t):
+    def _draw_panel(self, t):
         px=_BOARD_AREA_W; pw=C.GUI_SIDE_PANEL_W; ph=C.GUI_WINDOW_H
         ps=pygame.Surface((pw,ph),pygame.SRCALPHA); ps.fill((*C.GUI_COLOR_PANEL_BG,240))
         self._screen.blit(ps,(px,0))
@@ -684,7 +672,6 @@ class GUIView:
         self._screen.blit(su,(px+(pw-su.get_width())//2,y)); y+=26
         pygame.draw.line(self._screen,C.GUI_COLOR_PANEL_BORDER,(px+15,y),(px+pw-15,y),1); y+=14
 
-        # 当前回合
         if not self._game_over:
             cp=self._current_piece; pn=C.PIECE_NAMES[cp]
             cd=C.GUI_BLACK_BASE if cp==C.BLACK else C.GUI_WHITE_BASE
@@ -703,18 +690,22 @@ class GUIView:
                 dc=(40,40,40) if piece==C.BLACK else (230,230,220)
                 pygame.gfxdraw.filled_circle(self._screen,px+18,y+9,8,dc)
                 pygame.gfxdraw.aacircle(self._screen,px+18,y+9,8,(120,90,40))
-                ns=self._fs.render(player.name[:12],True,C.GUI_COLOR_TEXT_MAIN)
+                ns=self._fs.render(player.name[:14],True,C.GUI_COLOR_TEXT_MAIN)
                 self._screen.blit(ns,(px+34,y)); y+=22
         y+=6
         mt=self._fs.render(f"第 {self._move_count} 手",True,C.GUI_COLOR_TEXT_DIM)
         self._screen.blit(mt,(px+18,y)); y+=20
         pygame.draw.line(self._screen,C.GUI_COLOR_PANEL_BORDER,(px+15,y),(px+pw-15,y),1); y+=10
 
-        # 状态消息
         for ln in self._wrap(self._message,self._fs,pw-28):
             s=self._fs.render(ln,True,C.GUI_COLOR_TEXT_DIM)
             self._screen.blit(s,(px+14,y)); y+=18
         y+=4
+
+        # ── DeepSeek 双舱 UI ──────────────────────────────────
+        ds_agent = self._get_deepseek_agent()
+        if ds_agent is not None:
+            y = self._draw_deepseek_panel(px, pw, ph, y, t, ds_agent)
 
         # ── 技能区 ────────────────────────────────────────────
         is_human = self._is_human_turn()
@@ -726,13 +717,11 @@ class GUIView:
         self._btn_rects = {}
         btn_w=pw-24; btn_h=38; mgap=6
 
-        # 悔棋按钮
         undo_rect=pygame.Rect(px+12,y,btn_w,btn_h)
         self._btn_rects["undo"]=undo_rect
         self._draw_btn(undo_rect,"↩ 悔棋","Z键",is_human,None,t)
         y+=btn_h+mgap
 
-        # 三个技能按钮
         charges = self._engine_ref.skill_charges if self._engine_ref else {"horse":0,"swap":0,"void":0}
         for sk in ("horse","swap","void"):
             ch=charges.get(sk,0)
@@ -746,10 +735,95 @@ class GUIView:
             self._draw_skill_btn(rect, label, sub, available, active, key_color, t, sk)
             y+=btn_h+mgap
 
-        # 底部按键提示
         for i,h in enumerate(["ESC  取消技能/退出","Z键  悔棋","点击落子"]):
             s=self._fxs.render(h,True,C.GUI_COLOR_TEXT_DIM)
             self._screen.blit(s,(px+14,ph-56+i*18))
+
+    # ─────────────────────────────────────────────────────────
+    # DeepSeek 双舱渲染
+    # ─────────────────────────────────────────────────────────
+    def _get_deepseek_agent(self):
+        if not self._engine_ref:
+            return None
+        try:
+            from agents.deepseek_agent import DeepSeekAgent
+        except ImportError:
+            return None
+        for player in self._engine_ref._players.values():
+            if isinstance(player, DeepSeekAgent):
+                return player
+        return None
+
+    def _draw_deepseek_panel(self, px, pw, ph, y, t, agent):
+        """猫娘小五台词区（打字机效果）——无思考链舱。"""
+        pad = 10
+        inner_w = pw - pad * 2
+
+        with agent._lock:
+            reply_text  = agent.reply_text
+            is_thinking = agent.is_thinking
+
+        # ── 标题行：小五头像 + 状态 ──────────────────────────
+        CAT_COLOR = (255, 160, 220)   # 猫娘粉
+        label_text = "🐾 小五说…" if not is_thinking else "🐾 小五思考中…"
+        cat_label = self._fs.render(label_text, True, CAT_COLOR)
+        self._screen.blit(cat_label, (px + pad, y)); y += 22
+
+        # ── 打字机推进 ───────────────────────────────────────
+        # 检测文本变化则重置，并触发 TTS 语音朗读
+        if reply_text != self._typewriter_last_text:
+            self._typewriter_last_text = reply_text
+            self._typewriter_pos = 0
+            # 触发语音朗读（后台线程，不阻塞渲染）
+            tts = _get_tts()
+            if tts and reply_text:
+                tts.speak(reply_text)
+
+        full_text = self._typewriter_last_text or "（等待小五开口喵…）"
+
+        # 每帧推进 3 个字符
+        if self._typewriter_pos < len(full_text):
+            self._typewriter_pos = min(self._typewriter_pos + 3, len(full_text))
+
+        display_text = full_text[:self._typewriter_pos]
+        # 正在打字时末尾加光标
+        if self._typewriter_pos < len(full_text):
+            display_text += "█"
+
+        # ── 渲染台词气泡 ─────────────────────────────────────
+        reply_lines = self._wrap(display_text, self._fn, inner_w - 20)
+        box_h = max(70, len(reply_lines) * 26 + 20)
+        remaining = ph - y - 200
+        box_h = min(box_h, max(70, remaining))
+
+        rb_rect = pygame.Rect(px + pad, y, inner_w, box_h)
+        rb_surf = pygame.Surface((inner_w, box_h), pygame.SRCALPHA)
+        rb_surf.fill((*C.GUI_COLOR_REPLY_BG, 220))
+
+        # 呼吸边框：思考时闪烁粉色
+        if is_thinking:
+            pulse_a = int(abs(math.sin(t * 3)) * 120 + 100)
+            border_color = (*CAT_COLOR, pulse_a)
+        else:
+            border_color = (*C.GUI_COLOR_REPLY_TEXT, 140)
+        pygame.draw.rect(rb_surf, border_color,
+                         (0, 0, inner_w, box_h), 2, border_radius=10)
+        self._screen.blit(rb_surf, (rb_rect.x, rb_rect.y))
+
+        # 渲染文字
+        ry = rb_rect.y + 10
+        for line in reply_lines:
+            if ry + 26 > rb_rect.bottom - 4:
+                break
+            ls = self._fn.render(line, True, C.GUI_COLOR_REPLY_TEXT)
+            self._screen.blit(ls, (rb_rect.x + 10, ry))
+            ry += 26
+
+        y += box_h + 10
+        pygame.draw.line(self._screen, C.GUI_COLOR_PANEL_BORDER,
+                         (px + 15, y), (px + pw - 15, y), 1)
+        y += 10
+        return y
 
     def _draw_btn(self,rect,label,sublabel,enabled,color,t):
         surf=pygame.Surface((rect.w,rect.h),pygame.SRCALPHA)
@@ -770,16 +844,15 @@ class GUIView:
 
     def _draw_skill_btn(self,rect,label,sublabel,enabled,active,color,t,sk):
         surf=pygame.Surface((rect.w,rect.h),pygame.SRCALPHA)
-        # color 约定为 3 元素 RGB tuple
         if active:
             bg=(*tuple(int(c*0.3) for c in color),200)
-            bc=(*color, 220)   # 4 元素 RGBA
+            bc=(*color, 220)
         elif enabled:
             bg=(*C.GUI_COLOR_PANEL_BG,160)
-            bc=(*color, 160)   # 4 元素 RGBA
+            bc=(*color, 160)
         else:
             bg=(*C.GUI_COLOR_PANEL_BG,80)
-            bc=(50, 40, 30, 180)  # 4 元素 RGBA
+            bc=(50, 40, 30, 180)
         pygame.draw.rect(surf, bg, (0,0,rect.w,rect.h), border_radius=8)
         border_w=2 if active else 1
         pygame.draw.rect(surf, bc, (0,0,rect.w,rect.h), border_w, border_radius=8)
@@ -831,22 +904,16 @@ class GUIView:
     # ─────────────────────────────────────────────────────────
     @staticmethod
     def _lf(size, bold=False):
-        """加载支持中文的字体，优先用文件路径直接加载（避免 SysFont 名字查找失败）。"""
         pygame.font.init()
-        # 优先尝试文件路径加载（Linux 系统常见位置）
         font_paths = [
-            # Noto Sans CJK（简体中文最佳）
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc" if bold else
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-            # Arphic（备用）
             "/usr/share/fonts/truetype/arphic/uming.ttc",
             "/usr/share/fonts/truetype/arphic/ukai.ttc",
-            # macOS
             "/System/Library/Fonts/PingFang.ttc",
             "/Library/Fonts/Arial Unicode.ttf",
-            # Windows
             "C:/Windows/Fonts/msyh.ttc",
             "C:/Windows/Fonts/simhei.ttf",
         ]
@@ -859,7 +926,6 @@ class GUIView:
                         return f
                 except Exception:
                     continue
-        # 回退：SysFont
         for n in ["notosanscjk","notosanssc","wqymicrohei","SimHei","NotoSansCJK"]:
             try:
                 f = pygame.font.SysFont(n, size, bold=bold)

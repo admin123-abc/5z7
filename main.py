@@ -2,7 +2,7 @@
 # ============================================================
 #  main.py — 系统点火入口 + 依赖注入装配器
 #
-#  默认行为：直接弹出 Pygame GUI 主菜单（三按钮选模式）
+#  默认行为：直接弹出 Pygame GUI 主菜单（四按钮选模式）
 #  也支持命令行参数直接指定模式跳过菜单
 # ============================================================
 
@@ -18,6 +18,8 @@ if sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout = codecs.getwriter('utf-8')(sys.stdout.detach())
     sys.stderr = codecs.getwriter('utf-8')(sys.stderr.detach())
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="五子棋",
@@ -29,6 +31,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
   python main.py --mode pve             # 跳过菜单，直接人机对战
   python main.py --mode pvp             # 跳过菜单，直接双人对战
   python main.py --mode eve             # 跳过菜单，AI 自战
+  python main.py --mode pvd             # 跳过菜单，挑战 DeepSeek R1
   python main.py --cli --mode pve       # CLI 终端模式
   python main.py --depth 4              # 设置 AI 搜索深度
   python main.py --no-sound             # 静音模式
@@ -37,7 +40,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mode", "-m",
         default=None,
-        choices=["pvp", "pve", "evp", "eve", "rvp", "pvr"],
+        choices=["pvp", "pve", "evp", "eve", "rvp", "pvr", "pvd", "dvp"],
         help="直接指定对战模式（跳过菜单）",
     )
     parser.add_argument(
@@ -65,7 +68,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def make_players(mode, depth, use_gui):
+def make_players(mode: str, depth, use_gui: bool):
     from agents.minimax_ai import MinimaxAI
     from agents.rl_ai import RLPlayer
     from config import AI_SEARCH_DEPTH
@@ -78,6 +81,10 @@ def make_players(mode, depth, use_gui):
     def rl(name="RL AI"):
         return RLPlayer(name=name)
 
+    def deepseek(name="DeepSeek R1"):
+        from agents.deepseek_agent import DeepSeekAgent
+        return DeepSeekAgent(name=name)
+
     def human(name="玩家"):
         if use_gui:
             from agents.gui_human import GUIHumanPlayer
@@ -87,12 +94,15 @@ def make_players(mode, depth, use_gui):
             return HumanPlayer(name=name)
 
     mode_map = {
-        "pvp": (human("玩家 1"), human("玩家 2")),
-        "pve": (human("玩家"),   ai("Minimax AI")),
-        "evp": (ai("Minimax AI"), human("玩家")),
-        "eve": (ai("AI (黑)"),   ai("AI (白)")),
-        "rvp": (rl("RL AI"),     human("玩家")),
-        "pvr": (human("玩家"),   rl("RL AI")),
+        "pvp": (human("玩家 1"),         human("玩家 2")),
+        "pve": (human("玩家"),           ai("Minimax AI")),
+        "evp": (ai("Minimax AI"),        human("玩家")),
+        "eve": (ai("AI (黑)"),           ai("AI (白)")),
+        "rvp": (rl("RL AI"),             human("玩家")),
+        "pvr": (human("玩家"),           rl("RL AI")),
+        # DeepSeek R1 模式
+        "pvd": (human("玩家"),           deepseek("DeepSeek R1")),
+        "dvp": (deepseek("DeepSeek R1"), human("玩家")),
     }
     return mode_map[mode]
 
